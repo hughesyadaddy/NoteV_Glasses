@@ -156,6 +156,7 @@ final class CaptureManager: ObservableObject {
                 message: "Glasses aren't connected. Open Meta AI, confirm your glasses are paired, then try again."
             )
         }
+        glassesProvider.notePairedDeviceCount(atLeast: connectedDevices.count)
         try await glassesProvider.ensureCameraPermission()
     }
 
@@ -189,6 +190,9 @@ final class CaptureManager: ObservableObject {
     /// Start capture with the user-selected provider.
     func startCapture(preferredSource: CaptureSource = .phone) async throws {
         let provider = selectProvider(preferredSource: preferredSource)
+        if let glasses = provider as? GlassesCaptureProvider {
+            glasses.notePairedDeviceCount(atLeast: connectedDevices.count)
+        }
         do {
             try await provider.startCapture()
             NSLog("[CaptureManager] Capture started via \(activeSource.rawValue)")

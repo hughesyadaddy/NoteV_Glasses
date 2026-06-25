@@ -26,6 +26,8 @@ final class GlassesCaptureProvider: CaptureProvider {
     private var errorListenerToken: AnyListenerToken?
     private var photoDataListenerToken: AnyListenerToken?
     private var deviceMonitorTask: Task<Void, Never>?
+    private var pairedDevicesTask: Task<Void, Never>?
+    private var pairedDeviceCount = 0
 
     // Audio (glasses mic via Bluetooth HFP, not DAT SDK)
     private let audioEngine = AVAudioEngine()
@@ -85,7 +87,18 @@ final class GlassesCaptureProvider: CaptureProvider {
             }
         }
 
+        pairedDevicesTask = Task { [weak self, wearables] in
+            for await devices in wearables.devicesStream() {
+                self?.pairedDeviceCount = devices.count
+            }
+        }
+
         attachListeners()
+    }
+
+    deinit {
+        deviceMonitorTask?.cancel()
+        pairedDevicesTask?.cancel()
     }
 
     // MARK: - Listeners
@@ -145,9 +158,14 @@ final class GlassesCaptureProvider: CaptureProvider {
 
     // MARK: - CaptureProvider
 
+    /// Sync paired count from CaptureManager when `devicesStream` has not emitted yet on a fresh provider.
+    func notePairedDeviceCount(atLeast count: Int) {
+        pairedDeviceCount = max(pairedDeviceCount, count)
+    }
+
     /// Waits for an active glasses device, then requests Meta AI camera permission if needed.
     func ensureCameraPermission() async throws {
-        try await waitForConnectedDevice(timeoutSeconds: 10)
+        try await waitForConnectedDevice(timeoutSeconds: 15)
         try await requestCameraPermissionWithRetry()
     }
 
@@ -362,6 +380,12 @@ final class GlassesCaptureProvider: CaptureProvider {
         while Date() < deadline {
             if isAvailable { return }
             try await Task.sleep(nanoseconds: 200_000_000)
+        }
+
+        // UI uses wearables.devicesStream (paired/connected). AutoDeviceSelector can lag behind.
+        if pairedDeviceCount > 0 {
+            NSLog("[GlassesCaptureProvider] \(pairedDeviceCount) paired device(s) — proceeding to Meta camera permission")
+            return
         }
 
         throw Self.makeError(
