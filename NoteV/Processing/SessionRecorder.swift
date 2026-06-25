@@ -160,9 +160,10 @@ final class SessionRecorder: ObservableObject {
         }
 
         // Audio from active provider (glasses mic via Bluetooth HFP, or phone mic).
-        // STT processed on iPhone via Deepgram WebSocket.
+        // Tee before capture starts so no chunks are dropped during HFP/DAT spin-up.
         let audioStream = provider.audioStream
         let frameStream = provider.frameStream
+        let (sttAudioStream, muxAudioStream) = AudioStreamTee.tee(audioStream)
 
         audioPipeline.onLiveTranscriptStatusChange = { [weak self] status in
             self?.appState?.liveTranscriptStatus = status
@@ -228,13 +229,7 @@ final class SessionRecorder: ObservableObject {
         }
         NSLog("[SessionRecorder] Active capture source: \(captureManager.activeSource.rawValue)")
 
-        // Single audio stream → STT + MP4 mux (no duplicate capture paths).
-        let (sttAudioStream, muxAudioStream) = AudioStreamTee.tee(audioStream)
-
-        // Transcript stream feeds directly to collector (no fork needed — voice bookmark disabled)
-        let transcriptStream = audioPipeline.transcriptStream
-
-        // Start pipelines as concurrent tasks
+        // Start pipelines as concurrent tasks (streams already tee'd above).
         audioPipelineTask = Task.detached { [audioPipeline] in
             guard let pipeline = audioPipeline else { return }
             await pipeline.startProcessing(audioStream: sttAudioStream)
@@ -248,6 +243,8 @@ final class SessionRecorder: ObservableObject {
             guard let pipeline = framePipeline else { return }
             await pipeline.startProcessing(frameStream: frameStream)
         }
+
+        let transcriptStream = audioPipeline.transcriptStream
 
         // Start collector tasks
         startTranscriptCollector(stream: transcriptStream)

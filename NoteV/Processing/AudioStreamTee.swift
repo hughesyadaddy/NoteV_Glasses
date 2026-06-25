@@ -9,7 +9,7 @@ enum AudioStreamTee {
         let (sttStream, sttContinuation) = AsyncStream<AudioChunk>.makeStream()
         let (muxStream, muxContinuation) = AsyncStream<AudioChunk>.makeStream()
 
-        Task {
+        Task.detached(priority: .userInitiated) {
             for await chunk in source {
                 sttContinuation.yield(chunk)
                 muxContinuation.yield(chunk)

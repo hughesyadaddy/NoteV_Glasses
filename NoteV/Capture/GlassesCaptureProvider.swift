@@ -186,6 +186,12 @@ final class GlassesCaptureProvider: CaptureProvider {
                 audioEngine.inputNode.removeTap(onBus: 0)
                 throw GlassesHFPRoute.missingRouteError
             }
+            if !GlassesHFPRoute.isLikelyGlassesInput() {
+                audioEngine.stop()
+                audioEngine.inputNode.removeTap(onBus: 0)
+                sessionStartTime = nil
+                throw GlassesHFPRoute.wrongHFPDeviceError
+            }
             NSLog("[GlassesCaptureProvider] HFP route active — starting DAT video stream")
         } catch {
             audioEngine.stop()

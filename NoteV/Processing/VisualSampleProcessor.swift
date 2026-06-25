@@ -9,12 +9,19 @@ import UIKit
 /// - Throttled subset → JPEG `TimestampedFrame` for analysis pipeline
 final class VisualSampleProcessor: @unchecked Sendable {
 
+    private struct PendingPCM {
+        let data: Data
+        let sampleRate: Double
+    }
+
     private let queue = DispatchQueue(label: "com.notev.visualSampleProcessor")
     private var frameContinuation: AsyncStream<TimestampedFrame>.Continuation?
 
     var videoRecorder: VideoRecorder?
 
     private var sessionStartPTS: CMTime?
+    private var muxAudioSamplePosition: Int64 = 0
+    private var pendingPCM: [PendingPCM] = []
     private var frameIndex = 0
     private var lastYieldTime: TimeInterval = -999
     private var samplingInterval: TimeInterval = NoteVConfig.Frame.periodicSamplingInterval
@@ -39,6 +46,8 @@ final class VisualSampleProcessor: @unchecked Sendable {
     func reset() {
         queue.sync {
             sessionStartPTS = nil
+            muxAudioSamplePosition = 0
+            pendingPCM = []
             frameIndex = 0
             lastYieldTime = -999
             samplingInterval = NoteVConfig.Frame.periodicSamplingInterval
@@ -85,21 +94,16 @@ final class VisualSampleProcessor: @unchecked Sendable {
         }
     }
 
-    /// Muxes glasses mic PCM into the session MP4 with PTS aligned to the video stream.
+    /// Muxes glasses mic PCM into the session MP4 with PTS aligned to the video timeline.
     func processAudioPCM(data: Data, sessionRelativeTime: TimeInterval, sampleRate: Double = Double(NoteVConfig.Audio.muxSampleRate)) {
         queue.async { [weak self] in
             guard let self else { return }
-            let presentationTime = self.makeAudioPresentationTime(sessionRelativeTime: sessionRelativeTime)
-            guard let sampleBuffer = AudioSampleBufferFactory.makePCMSampleBuffer(
-                data: data,
-                sampleRate: sampleRate,
-                channels: UInt32(NoteVConfig.Audio.channels),
-                presentationTime: presentationTime
-            ) else {
-                NSLog("[VisualSampleProcessor] ERROR: Could not build audio sample buffer")
+            let pending = PendingPCM(data: data, sampleRate: sampleRate)
+            guard self.sessionStartPTS != nil else {
+                self.pendingPCM.append(pending)
                 return
             }
-            self.processAudioSampleOnQueue(sampleBuffer)
+            self.appendPCMBuffer(pending)
         }
     }
 
@@ -113,9 +117,15 @@ final class VisualSampleProcessor: @unchecked Sendable {
 
     private func processVideoSampleOnQueue(_ sampleBuffer: CMSampleBuffer) {
         let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+        let hadTimebase = sessionStartPTS != nil
         if sessionStartPTS == nil {
             sessionStartPTS = pts
+            flushPendingPCMOnQueue()
         }
+        if !hadTimebase, sessionStartPTS != nil {
+            NSLog("[VisualSampleProcessor] Video timebase established — flushing \(pendingPCM.count) buffered PCM chunks")
+        }
+
         let relativePTS = CMTimeSubtract(pts, sessionStartPTS!)
         guard let muxBuffer = SampleBufferRetimestamp.retimestamp(sampleBuffer, presentationTime: relativePTS) else {
             NSLog("[VisualSampleProcessor] ERROR: Could not retimestamp video sample")
@@ -154,13 +164,41 @@ final class VisualSampleProcessor: @unchecked Sendable {
         videoRecorder?.appendAudio(sampleBuffer)
     }
 
-    private func makeAudioPresentationTime(sessionRelativeTime: TimeInterval) -> CMTime {
-        CMTime(seconds: sessionRelativeTime, preferredTimescale: 600)
+    private func appendPCMBuffer(_ pending: PendingPCM) {
+        let frameCount = pending.data.count / MemoryLayout<Int16>.size
+        guard frameCount > 0 else { return }
+
+        let presentationTime = CMTime(
+            value: muxAudioSamplePosition,
+            timescale: CMTimeScale(pending.sampleRate)
+        )
+        muxAudioSamplePosition += Int64(frameCount)
+
+        guard let sampleBuffer = AudioSampleBufferFactory.makePCMSampleBuffer(
+            data: pending.data,
+            sampleRate: pending.sampleRate,
+            channels: UInt32(NoteVConfig.Audio.channels),
+            presentationTime: presentationTime
+        ) else {
+            NSLog("[VisualSampleProcessor] ERROR: Could not build audio sample buffer (\(frameCount) frames @ \(Int(pending.sampleRate))Hz)")
+            return
+        }
+        processAudioSampleOnQueue(sampleBuffer)
+    }
+
+    private func flushPendingPCMOnQueue() {
+        guard sessionStartPTS != nil, !pendingPCM.isEmpty else { return }
+        let buffered = pendingPCM
+        pendingPCM = []
+        for chunk in buffered {
+            appendPCMBuffer(chunk)
+        }
     }
 
     private func establishTimebaseIfNeededOnQueue(for sampleBuffer: CMSampleBuffer) {
         guard sessionStartPTS == nil else { return }
         sessionStartPTS = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+        flushPendingPCMOnQueue()
     }
 
     private func presentationTimeOnQueue(for sampleBuffer: CMSampleBuffer) -> TimeInterval? {

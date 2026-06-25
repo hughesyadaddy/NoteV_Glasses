@@ -287,6 +287,38 @@ final class VideoPipelineTests: XCTestCase {
         try? FileManager.default.removeItem(at: tempURL)
     }
 
+    func testProcessorMuxesGlassesPCMOnVideoTimeline() async throws {
+        let tempURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("notev-test-\(UUID().uuidString).mp4")
+
+        let processor = VisualSampleProcessor()
+        let recorder = VideoRecorder()
+        try recorder.startRecording(to: tempURL)
+        processor.videoRecorder = recorder
+
+        // Simulate glasses audio arriving on wall clock before/after video (misaligned timestamps).
+        let pcm = Data(repeating: 0, count: 3200)
+        processor.processAudioPCM(data: pcm, sessionRelativeTime: 12.0, sampleRate: Double(NoteVConfig.Audio.muxSampleRate))
+
+        let videoBuffer = makeVideoSampleBuffer(presentationTime: CMTime(seconds: 0, preferredTimescale: 600))
+        processor.processVideoSample(videoBuffer)
+
+        processor.processAudioPCM(data: pcm, sessionRelativeTime: 20.0, sampleRate: Double(NoteVConfig.Audio.muxSampleRate))
+
+        await processor.flushAndWait()
+
+        XCTAssertGreaterThan(recorder.muxedAudioSampleCount, 0)
+
+        let result = try await recorder.finishRecording()
+        XCTAssertNotNil(result)
+
+        let asset = AVURLAsset(url: tempURL)
+        let audioTracks = try await asset.loadTracks(withMediaType: .audio)
+        XCTAssertEqual(audioTracks.count, 1)
+
+        try? FileManager.default.removeItem(at: tempURL)
+    }
+
     // MARK: - SessionStore
 
     func testSessionStoreVideoURL() {
